@@ -1,0 +1,6 @@
+[
+  {
+    "type": "sqlite",
+    "path": "/var/www/zroby_sam/storage/database/zroby_sam.sqlite"
+  }
+]
