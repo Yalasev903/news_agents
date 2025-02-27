@@ -10,22 +10,22 @@ from crewai.memory import LongTermMemory
 from crewai.memory.storage.ltm_sqlite_storage import LTMSQLiteStorage
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения из .env
+# Загружаємо змінні середовища з .env
 load_dotenv("/var/www/zroby_sam_crewai/news_agents/.env")
 
-# Инициализация инструмента поиска
+# Ініціалізація інструмента пошуку
 search_tool = SerperDevTool()
 
-# Функция для сохранения одной новости в БД
+# Функція для збереження однієї новини в БД
 def save_news_to_db(title, slug, excerpt, content, category_id, image_url):
     conn = sqlite3.connect('/var/www/zroby_sam/storage/database/zroby_sam.sqlite')
     cursor = conn.cursor()
 
-    # Проверяем, существует ли уже запись с таким slug
+    # Перевіряємо, чи існує запис із таким slug
     cursor.execute("SELECT COUNT(*) FROM news WHERE slug = ?", (slug,))
     count = cursor.fetchone()[0]
     if count > 0:
-        # Если существует, генерируем новый уникальный slug, добавляя метку времени
+        # Якщо існує, генеруємо новий унікальний slug, додаючи метку часу
         slug = f"{slug}-{int(datetime.now().timestamp())}"
 
     cursor.execute("""
@@ -36,77 +36,110 @@ def save_news_to_db(title, slug, excerpt, content, category_id, image_url):
     conn.close()
     print(f"[DEBUG] Saved news: title='{title}', slug='{slug}', category_id={category_id}")
 
-# Callback для обработки вывода задачи перед сохранением
+# Callback для обробки виводу задачі перед збереженням
 def save_news_callback(output):
-    print("[DEBUG] Запущен save_news_callback, output =", output)
+    print("[DEBUG] Запущено save_news_callback, output =", output)
     
-    # Преобразуем output в словарь/список
+    # Преобразуємо output у словник/список
     if hasattr(output, "model_dump"):
         output_data = output.model_dump()
     else:
         output_data = output
 
-    print("[DEBUG] Полученные данные:", output_data)
+    print("[DEBUG] Отримані дані:", output_data)
 
     def process_news_item(news_item):
         title = (news_item.get('title') or news_item.get('Title') or '').strip()
         slug = (news_item.get('slug') or news_item.get('Slug') or '').strip()
         excerpt = (news_item.get('excerpt') or news_item.get('Excerpt') or '').strip()
         content = (news_item.get('content') or news_item.get('Content') or '').strip()
-        # Проверяем варианты для идентификатора категории
+        # Перевіряємо варіанти ключа для категорії
         category_id = (news_item.get('category_id') or 
                        news_item.get('news_category_id') or 
                        news_item.get('neww_categori_id') or
                        news_item.get('new_categori_id') or 0)
         image_url = (news_item.get('image_url') or news_item.get('Image_url') or '').strip()
-
-        print(f"[DEBUG] Обрабатываем новость: title='{title}', slug='{slug}', category_id={category_id}")
+        print(f"[DEBUG] Обробляємо новину: title='{title}', slug='{slug}', category_id={category_id}")
         save_news_to_db(title, slug, excerpt, content, category_id, image_url)
 
-    # Если output_data содержит ключ 'raw'
+    # Якщо output_data містить ключ 'raw'
     if isinstance(output_data, dict) and 'raw' in output_data:
         raw_value = output_data['raw']
-        # Если raw начинается с '[', предполагаем, что это JSON-массив
-        if raw_value.strip().startswith('['):
+        raw_str = raw_value.strip()
+        # Видаляємо markdown-кодові огородження, якщо є
+        if raw_str.startswith("```"):
+            lines = raw_str.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            raw_str = "\n".join(lines).strip()
+        print("[DEBUG] Очишчений raw текст:", raw_str)
+        
+        # Якщо рядок починається з '{' або '[', спробуємо отримати коректний JSON
+        if raw_str.startswith('{') or raw_str.startswith('['):
+            # Знаходимо останню закриваючу фігурну скобку
+            last_brace = raw_str.rfind('}')
+            if last_brace != -1:
+                raw_str = raw_str[:last_brace+1]
             try:
-                # Если присутствует завершающий текст, отсекаем его
-                idx = raw_value.find("Новини успішно збережені")
-                if idx != -1:
-                    json_str = raw_value[:idx].strip()
-                else:
-                    json_str = raw_value.strip()
-                news_list = json.loads(json_str)
-                print("[DEBUG] Распарсенный JSON:", news_list)
-                if isinstance(news_list, list):
-                    for news_item in news_list:
-                        process_news_item(news_item)
-                else:
-                    process_news_item(news_list)
-                return
+                parsed = json.loads(raw_str)
             except Exception as e:
-                print("[DEBUG] Ошибка парсинга JSON:", e)
+                print("[DEBUG] Помилка парсингу JSON:", e)
+                parsed = None
+            news_list = []
+            if parsed:
+                if isinstance(parsed, dict) and "news" in parsed:
+                    news_list = parsed["news"]
+                elif isinstance(parsed, list):
+                    news_list = parsed
+                else:
+                    print("[DEBUG] Неочікуваний формат JSON:", parsed)
+            else:
+                print("[DEBUG] Не вдалося розпарсити JSON.")
         else:
-            print("[DEBUG] Обнаружен raw SQL, пытаемся выполнить его.")
-            start_idx = raw_value.find("INSERT INTO news")
+            print("[DEBUG] Виявлено raw SQL, намагаємося виконати його.")
+            start_idx = raw_str.find("INSERT INTO news")
             if start_idx != -1:
-                sql_part = raw_value[start_idx:]
+                sql_part = raw_str[start_idx:]
                 end_idx = sql_part.find("Новини успішно збережені")
                 if end_idx != -1:
                     sql_part = sql_part[:end_idx]
                 if not sql_part.strip().endswith(";"):
                     sql_part = sql_part.strip() + ";"
-                print("[DEBUG] SQL для выполнения:\n", sql_part)
+                print("[DEBUG] SQL для виконання:\n", sql_part)
                 try:
                     conn = sqlite3.connect('/var/www/zroby_sam/storage/database/zroby_sam.sqlite')
                     conn.executescript(sql_part)
                     conn.commit()
                     conn.close()
-                    print("[DEBUG] SQL скрипт успешно выполнен.")
+                    print("[DEBUG] SQL скрипт успішно виконано.")
                 except Exception as e:
-                    print("[DEBUG] Ошибка при выполнении SQL скрипта:", e)
+                    print("[DEBUG] Помилка при виконанні SQL скрипта:", e)
                 return
 
-    # Если данные уже структурированы (либо если не сработала обработка raw)
+        print("[DEBUG] Розпарсений JSON (news_list):", news_list)
+        # Фільтрація: для кожної категорії вибираємо першу новину, де довжина content ≥ 1000 символів
+        selected = {}
+        for item in news_list:
+            cat = item.get("new_categori_id") or item.get("new_categori_id".lower())
+            if not cat:
+                continue
+            content = item.get("content") or ""
+            if len(content) < 200:
+                continue
+            if cat not in selected:
+                selected[cat] = item
+        result_news = list(selected.values())
+        print("[DEBUG] Відобрані новини по категоріях:", result_news)
+        if not result_news:
+            print("[DEBUG] Немає новин, що задовольняють критерії (content ≥1000 символів).")
+        else:
+            for news_item in result_news:
+                process_news_item(news_item)
+        return
+
+    # Якщо дані вже структуровані (як список чи словник без 'raw')
     if isinstance(output_data, list):
         for news_item in output_data:
             process_news_item(news_item)
@@ -115,10 +148,10 @@ def save_news_callback(output):
 
 @CrewBase
 class NewsAgents:
-    """Команда агентов для обработки новостей"""
+    """Команда агентів для обробки новин"""
 
     def __init__(self):
-        # Загрузка конфигураций агентов и задач из YAML-файлов
+        # Завантаження конфігурацій агентів та задач з YAML-файлів
         base_dir = os.path.dirname(__file__)
         config_dir = os.path.join(base_dir, "config")
         with open(os.path.join(config_dir, 'agents.yaml'), 'r', encoding='utf-8') as f:
@@ -158,14 +191,14 @@ class NewsAgents:
     def reporting_task(self) -> Task:
         return Task(
             config=self.tasks_config['reporting_task'],
-            output_file='report.md'
+            output_file='report.json'
         )
 
     @task
     def publishing_task(self) -> Task:
         return Task(
             config=self.tasks_config['publishing_task'],
-            memory=True, 
+            memory=True,
             callback=save_news_callback
         )
 
