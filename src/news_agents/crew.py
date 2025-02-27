@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import yaml
+import json
 from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
 from crewai_tools import SerperDevTool
@@ -15,7 +16,7 @@ load_dotenv("/var/www/zroby_sam_crewai/news_agents/.env")
 # Инициализация инструмента поиска
 search_tool = SerperDevTool()
 
-# Функция для сохранения новости в БД
+# Функция для сохранения одной новости в БД
 def save_news_to_db(title, slug, excerpt, content, category_id, image_url):
     conn = sqlite3.connect('/var/www/zroby_sam/storage/database/zroby_sam.sqlite')
     cursor = conn.cursor()
@@ -37,7 +38,6 @@ def save_news_to_db(title, slug, excerpt, content, category_id, image_url):
 
 # Callback для обработки вывода задачи перед сохранением
 def save_news_callback(output):
-    # Вывод для отладки
     print("[DEBUG] Запущен save_news_callback, output =", output)
     
     # Преобразуем output в словарь/список
@@ -49,12 +49,11 @@ def save_news_callback(output):
     print("[DEBUG] Полученные данные:", output_data)
 
     def process_news_item(news_item):
-        # Получаем значения для каждого поля с учётом возможных вариантов ключей
         title = (news_item.get('title') or news_item.get('Title') or '').strip()
         slug = (news_item.get('slug') or news_item.get('Slug') or '').strip()
         excerpt = (news_item.get('excerpt') or news_item.get('Excerpt') or '').strip()
         content = (news_item.get('content') or news_item.get('Content') or '').strip()
-        # Проверяем варианты для идентификатора категории:
+        # Проверяем варианты для идентификатора категории
         category_id = (news_item.get('category_id') or 
                        news_item.get('news_category_id') or 
                        news_item.get('neww_categori_id') or
@@ -64,7 +63,50 @@ def save_news_callback(output):
         print(f"[DEBUG] Обрабатываем новость: title='{title}', slug='{slug}', category_id={category_id}")
         save_news_to_db(title, slug, excerpt, content, category_id, image_url)
 
-    # Если output_data является списком новостей
+    # Если output_data содержит ключ 'raw'
+    if isinstance(output_data, dict) and 'raw' in output_data:
+        raw_value = output_data['raw']
+        # Если raw начинается с '[', предполагаем, что это JSON-массив
+        if raw_value.strip().startswith('['):
+            try:
+                # Если присутствует завершающий текст, отсекаем его
+                idx = raw_value.find("Новини успішно збережені")
+                if idx != -1:
+                    json_str = raw_value[:idx].strip()
+                else:
+                    json_str = raw_value.strip()
+                news_list = json.loads(json_str)
+                print("[DEBUG] Распарсенный JSON:", news_list)
+                if isinstance(news_list, list):
+                    for news_item in news_list:
+                        process_news_item(news_item)
+                else:
+                    process_news_item(news_list)
+                return
+            except Exception as e:
+                print("[DEBUG] Ошибка парсинга JSON:", e)
+        else:
+            print("[DEBUG] Обнаружен raw SQL, пытаемся выполнить его.")
+            start_idx = raw_value.find("INSERT INTO news")
+            if start_idx != -1:
+                sql_part = raw_value[start_idx:]
+                end_idx = sql_part.find("Новини успішно збережені")
+                if end_idx != -1:
+                    sql_part = sql_part[:end_idx]
+                if not sql_part.strip().endswith(";"):
+                    sql_part = sql_part.strip() + ";"
+                print("[DEBUG] SQL для выполнения:\n", sql_part)
+                try:
+                    conn = sqlite3.connect('/var/www/zroby_sam/storage/database/zroby_sam.sqlite')
+                    conn.executescript(sql_part)
+                    conn.commit()
+                    conn.close()
+                    print("[DEBUG] SQL скрипт успешно выполнен.")
+                except Exception as e:
+                    print("[DEBUG] Ошибка при выполнении SQL скрипта:", e)
+                return
+
+    # Если данные уже структурированы (либо если не сработала обработка raw)
     if isinstance(output_data, list):
         for news_item in output_data:
             process_news_item(news_item)
