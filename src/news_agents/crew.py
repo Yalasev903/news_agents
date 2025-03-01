@@ -5,45 +5,56 @@ import json
 import re
 from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
-from crewai_tools import SerperDevTool, DallETool  # Используем корректное имя класса
+from crewai_tools import SerperDevTool, DallETool
 from datetime import datetime
 from crewai.memory import LongTermMemory
 from crewai.memory.storage.ltm_sqlite_storage import LTMSQLiteStorage
 from dotenv import load_dotenv
 
-# Загружаємо змінні середовища з .env
+# Загружаем переменные окружения
 load_dotenv("/var/www/zroby_sam_crewai/news_agents/.env")
 
-# Ініціалізація інструмента пошуку
+# Инициализация инструментов
 search_tool = SerperDevTool()
-# Ініціалізація DALL-E інструмента
 dalle_tool = DallETool()
 
-# Функція для збереження однієї новини в БД
 def save_news_to_db(title, slug, excerpt, content, category_id, image_url):
     conn = sqlite3.connect('/var/www/zroby_sam/storage/database/zroby_sam.sqlite')
     cursor = conn.cursor()
-
-    # Перевіряємо, чи існує запис із таким slug
+    # Проверяем, существует ли новость с таким slug
     cursor.execute("SELECT COUNT(*) FROM news WHERE slug = ?", (slug,))
     count = cursor.fetchone()[0]
     if count > 0:
-        # Якщо існує, генеруємо новий унікальний slug, додаючи метку часу
         slug = f"{slug}-{int(datetime.now().timestamp())}"
-
     cursor.execute("""
         INSERT INTO news (title, slug, excerpt, content, news_category_id, image_url, published_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (title, slug, excerpt, content, category_id, image_url, datetime.now().isoformat()))
+    """, (title, slug, excerpt, content, category_id, image_url, datetime.now().isoformat()))
     conn.commit()
     conn.close()
     print(f"[DEBUG] Saved news: title='{title}', slug='{slug}', category_id={category_id}")
 
-# Callback для обробки виводу задачі перед збереженням
+def load_news_from_report():
+    try:
+        with open('report.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        # Если данные представлены в виде словаря с ключом 'news', то берем его,
+        # иначе, если это список, возвращаем его
+        if isinstance(data, dict):
+            news_list = data.get('news', [])
+        elif isinstance(data, list):
+            news_list = data
+        else:
+            news_list = []
+        print("[DEBUG] Загружены новости из report.json:", news_list)
+        return news_list
+    except Exception as e:
+        print("[DEBUG] Не удалось загрузить report.json:", e)
+        return []
+
 def save_news_callback(output):
     print("[DEBUG] Запущено save_news_callback, output =", output)
     
-    # Преобразуємо output у словник/список
     if hasattr(output, "model_dump"):
         output_data = output.model_dump()
     else:
@@ -56,29 +67,39 @@ def save_news_callback(output):
         slug = (news_item.get('slug') or news_item.get('Slug') or '').strip()
         excerpt = (news_item.get('excerpt') or news_item.get('Excerpt') or '').strip()
         content = (news_item.get('content') or news_item.get('Content') or '').strip()
-        # Отримуємо ідентифікатор категорії
         category_id = (news_item.get('category_id') or 
                        news_item.get('news_category_id') or 
                        news_item.get('neww_categori_id') or
                        news_item.get('new_categori_id') or 0)
-        # Генеруємо зображення за допомогою DALL-E Tool для кожної новини
-        prompt = f"Generate a high quality news illustration image for the news titled '{title}'"
+        
+        # Генерируем изображение через DALL‑E Tool
+        prompt = (f"Generate a high quality news illustration image for the news titled '{title}'. "
+                  "Return only the image URL in your response.")
         try:
-            generated_image = dalle_tool._run(prompt=prompt)
-            image_url = generated_image.strip() if generated_image else ""
+            generated_response = dalle_tool.run(prompt=prompt)
+            print(f"[DEBUG] Відповідь DALL‑E: {generated_response} (тип: {type(generated_response)})")
+            if isinstance(generated_response, dict) and "data" in generated_response:
+                image_url = generated_response["data"][0]["url"]
+            elif isinstance(generated_response, str):
+                image_url = generated_response.strip()
+            else:
+                image_url = ""
+            # Если полученное значение не является корректным URL, используем запасное значение
+            if not image_url.startswith("http"):
+                print(f"[DEBUG] Отримано некоректне значення image_url від DALL‑E: {image_url}. Використовуємо запасне значення.")
+                image_url = (news_item.get('image_url') or news_item.get('Image_url') or '').strip()
             print(f"[DEBUG] Згенеровано зображення для '{title}': {image_url}")
         except Exception as e:
-            print("[DEBUG] Помилка генерації зображення через DALL-E:", e)
+            print("[DEBUG] Помилка генерації зображення через DALL‑E:", e)
             image_url = (news_item.get('image_url') or news_item.get('Image_url') or '').strip()
-            
+        
         print(f"[DEBUG] Обробляємо новину: title='{title}', slug='{slug}', category_id={category_id}")
         save_news_to_db(title, slug, excerpt, content, category_id, image_url)
 
-    # Якщо output_data містить ключ 'raw'
+    # Обработка output, если присутствует ключ 'raw'
     if isinstance(output_data, dict) and 'raw' in output_data:
-        raw_value = output_data['raw']
-        raw_str = raw_value.strip()
-        # Видаляємо markdown-кодові огородження, якщо є
+        raw_str = output_data['raw'].strip()
+        # Убираем блоки markdown, если они есть
         if raw_str.startswith("```"):
             lines = raw_str.splitlines()
             if lines[0].startswith("```"):
@@ -86,85 +107,51 @@ def save_news_callback(output):
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             raw_str = "\n".join(lines).strip()
-        print("[DEBUG] Очишчений raw текст:", raw_str)
+        print("[DEBUG] Очищенный raw текст:", raw_str)
         
         news_list = []
-        # Якщо рядок починається з '{' або '[', намагаємося отримати коректний JSON
-        if raw_str.startswith('{') or raw_str.startswith('['):
-            # Спочатку намагаємося обрізати текст до останньої закриваючої фігурної скобки
-            last_brace = raw_str.rfind('}')
-            if last_brace != -1:
-                candidate = raw_str[:last_brace+1]
-            else:
-                candidate = raw_str
+        # Если текст начинается с '{' или '[', пробуем разобрать как JSON
+        if raw_str.startswith("{") or raw_str.startswith("["):
             try:
-                parsed = json.loads(candidate)
+                news_list = json.loads(raw_str)
             except Exception as e:
-                print("[DEBUG] Помилка парсингу JSON:", e)
-                # Якщо помилка, спробуємо використати регулярне вираження для витягування JSON-масиву
-                match = re.search(r'(\[.*\])', raw_str, re.DOTALL)
-                if match:
-                    json_str = match.group(1)
-                    print("[DEBUG] JSON string extracted by regex:", json_str)
-                    try:
-                        parsed = json.loads(json_str)
-                    except Exception as e2:
-                        print("[DEBUG] Помилка парсингу JSON (regex):", e2)
-                        parsed = None
-                else:
-                    parsed = None
-            if parsed:
-                if isinstance(parsed, dict) and "news" in parsed:
-                    news_list = parsed["news"]
-                elif isinstance(parsed, list):
-                    news_list = parsed
-                else:
-                    print("[DEBUG] Неочікуваний формат JSON:", parsed)
-            else:
-                print("[DEBUG] Не вдалося розпарсити JSON.")
+                print("[DEBUG] Ошибка парсинга JSON:", e)
         else:
-            print("[DEBUG] Виявлено raw SQL, намагаємося виконати його.")
-            start_idx = raw_str.find("INSERT INTO news")
-            if start_idx != -1:
-                sql_part = raw_str[start_idx:]
-                end_idx = sql_part.find("Новини успішно збережені")
-                if end_idx != -1:
-                    sql_part = sql_part[:end_idx]
-                if not sql_part.strip().endswith(";"):
-                    sql_part = sql_part.strip() + ";"
-                print("[DEBUG] SQL для виконання:\n", sql_part)
-                try:
-                    conn = sqlite3.connect('/var/www/zroby_sam/storage/database/zroby_sam.sqlite')
-                    conn.executescript(sql_part)
-                    conn.commit()
-                    conn.close()
-                    print("[DEBUG] SQL скрипт успішно виконано.")
-                except Exception as e:
-                    print("[DEBUG] Помилка при виконанні SQL скрипта:", e)
-                return
+            # Если raw текст не похож на JSON, пробуем загрузить новости из report.json
+            print("[DEBUG] Raw текст не содержит JSON. Пытаемся загрузить новости из report.json.")
+            news_list = load_news_from_report()
 
+        # Если получены новости в виде словаря, пытаемся извлечь по ключу
+        if isinstance(news_list, dict):
+            if "news" in news_list:
+                news_list = news_list["news"]
+            elif "новини" in news_list:
+                news_list = news_list["новини"]
+            else:
+                news_list = []
         print("[DEBUG] Розпарсений JSON (news_list):", news_list)
-        # Фільтрація: для кожної категорії вибираємо першу новину, де довжина content ≥ 1000 символів
+        # Фильтрация новостей по категориям (сниженный порог длины контента)
         selected = {}
         for item in news_list:
             cat = item.get("new_categori_id") or item.get("new_categori_id".lower())
             if not cat:
                 continue
             item_content = item.get("content") or ""
-            if len(item_content) < 1000:
+            # Если условие на длину контента слишком жёсткое, порог можно снизить
+            if len(item_content) < 400:
                 continue
             if cat not in selected:
                 selected[cat] = item
         result_news = list(selected.values())
         print("[DEBUG] Відобрані новини по категоріях:", result_news)
         if not result_news:
-            print("[DEBUG] Немає новин, що задовольняють критерії (content ≥1000 символів).")
+            print("[DEBUG] Немає новин, що задовольняють критерії (content ≥100 символів).")
         else:
             for news_item in result_news:
                 process_news_item(news_item)
         return
 
-    # Якщо дані вже структуровані (як список чи словник без 'raw')
+    # Если output_data является списком, обрабатываем каждую новость
     if isinstance(output_data, list):
         for news_item in output_data:
             process_news_item(news_item)
@@ -176,7 +163,6 @@ class NewsAgents:
     """Команда агентів для обробки новин"""
 
     def __init__(self):
-        # Завантаження конфігурацій агентів та задач з YAML-файлів
         base_dir = os.path.dirname(__file__)
         config_dir = os.path.join(base_dir, "config")
         with open(os.path.join(config_dir, 'agents.yaml'), 'r', encoding='utf-8') as f:
@@ -204,7 +190,7 @@ class NewsAgents:
         return Agent(
             config=self.agents_config['db_publisher'],
             verbose=True,
-            tools=[dalle_tool]  # Додаємо DALL-E Tool до інструментів агента
+            tools=[dalle_tool]
         )
 
     @task
