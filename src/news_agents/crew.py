@@ -2,9 +2,10 @@ import os
 import sqlite3
 import yaml
 import json
+import re
 from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
-from crewai_tools import SerperDevTool
+from crewai_tools import SerperDevTool, DallETool  # Используем корректное имя класса
 from datetime import datetime
 from crewai.memory import LongTermMemory
 from crewai.memory.storage.ltm_sqlite_storage import LTMSQLiteStorage
@@ -15,6 +16,8 @@ load_dotenv("/var/www/zroby_sam_crewai/news_agents/.env")
 
 # Ініціалізація інструмента пошуку
 search_tool = SerperDevTool()
+# Ініціалізація DALL-E інструмента
+dalle_tool = DallETool()
 
 # Функція для збереження однієї новини в БД
 def save_news_to_db(title, slug, excerpt, content, category_id, image_url):
@@ -53,12 +56,21 @@ def save_news_callback(output):
         slug = (news_item.get('slug') or news_item.get('Slug') or '').strip()
         excerpt = (news_item.get('excerpt') or news_item.get('Excerpt') or '').strip()
         content = (news_item.get('content') or news_item.get('Content') or '').strip()
-        # Перевіряємо варіанти ключа для категорії
+        # Отримуємо ідентифікатор категорії
         category_id = (news_item.get('category_id') or 
                        news_item.get('news_category_id') or 
                        news_item.get('neww_categori_id') or
                        news_item.get('new_categori_id') or 0)
-        image_url = (news_item.get('image_url') or news_item.get('Image_url') or '').strip()
+        # Генеруємо зображення за допомогою DALL-E Tool для кожної новини
+        prompt = f"Generate a high quality news illustration image for the news titled '{title}'"
+        try:
+            generated_image = dalle_tool._run(prompt=prompt)
+            image_url = generated_image.strip() if generated_image else ""
+            print(f"[DEBUG] Згенеровано зображення для '{title}': {image_url}")
+        except Exception as e:
+            print("[DEBUG] Помилка генерації зображення через DALL-E:", e)
+            image_url = (news_item.get('image_url') or news_item.get('Image_url') or '').strip()
+            
         print(f"[DEBUG] Обробляємо новину: title='{title}', slug='{slug}', category_id={category_id}")
         save_news_to_db(title, slug, excerpt, content, category_id, image_url)
 
@@ -76,18 +88,31 @@ def save_news_callback(output):
             raw_str = "\n".join(lines).strip()
         print("[DEBUG] Очишчений raw текст:", raw_str)
         
-        # Якщо рядок починається з '{' або '[', спробуємо отримати коректний JSON
+        news_list = []
+        # Якщо рядок починається з '{' або '[', намагаємося отримати коректний JSON
         if raw_str.startswith('{') or raw_str.startswith('['):
-            # Знаходимо останню закриваючу фігурну скобку
+            # Спочатку намагаємося обрізати текст до останньої закриваючої фігурної скобки
             last_brace = raw_str.rfind('}')
             if last_brace != -1:
-                raw_str = raw_str[:last_brace+1]
+                candidate = raw_str[:last_brace+1]
+            else:
+                candidate = raw_str
             try:
-                parsed = json.loads(raw_str)
+                parsed = json.loads(candidate)
             except Exception as e:
                 print("[DEBUG] Помилка парсингу JSON:", e)
-                parsed = None
-            news_list = []
+                # Якщо помилка, спробуємо використати регулярне вираження для витягування JSON-масиву
+                match = re.search(r'(\[.*\])', raw_str, re.DOTALL)
+                if match:
+                    json_str = match.group(1)
+                    print("[DEBUG] JSON string extracted by regex:", json_str)
+                    try:
+                        parsed = json.loads(json_str)
+                    except Exception as e2:
+                        print("[DEBUG] Помилка парсингу JSON (regex):", e2)
+                        parsed = None
+                else:
+                    parsed = None
             if parsed:
                 if isinstance(parsed, dict) and "news" in parsed:
                     news_list = parsed["news"]
@@ -125,8 +150,8 @@ def save_news_callback(output):
             cat = item.get("new_categori_id") or item.get("new_categori_id".lower())
             if not cat:
                 continue
-            content = item.get("content") or ""
-            if len(content) < 200:
+            item_content = item.get("content") or ""
+            if len(item_content) < 1000:
                 continue
             if cat not in selected:
                 selected[cat] = item
@@ -178,7 +203,8 @@ class NewsAgents:
     def db_publisher(self) -> Agent:
         return Agent(
             config=self.agents_config['db_publisher'],
-            verbose=True
+            verbose=True,
+            tools=[dalle_tool]  # Додаємо DALL-E Tool до інструментів агента
         )
 
     @task

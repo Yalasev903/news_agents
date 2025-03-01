@@ -28,13 +28,13 @@ reporting_task:
 
 publishing_task:
   description: >
-    На основі даних з report.json сформуйте JSON-масив, де кожна новина має наступні поля:
+    На основі даних з report.json сформуйте JSON‑масив, де кожна новина має наступні поля:
       - title: Заголовок новини.
-      - slug: URL-friendly версія заголовку (формується з title).
+      - slug: URL‑friendly версія заголовку (формується з title).
       - excerpt: Короткий опис новини.
       - content: Повний текст новини.
       - new_categori_id: Ідентифікатор категорії (1 – Будівництво/Ремонт, 2 – Краса).
-      - image_url: URL зображення.
+      - image_url: URL зображення, згенерованого за допомогою DALL‑E для кожної новини.
       - created_at: Дата створення (формат YYYY-MM-DD).
       - updated_at: Дата оновлення (формат YYYY-MM-DD).
   expected_output: "Новини успішно збережені у базі даних."
