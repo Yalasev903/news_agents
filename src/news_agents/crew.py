@@ -21,11 +21,15 @@ dalle_tool = DallETool()
 def save_news_to_db(title, slug, excerpt, content, category_id, image_url):
     conn = sqlite3.connect('/var/www/zroby_sam/storage/database/zroby_sam.sqlite')
     cursor = conn.cursor()
-    # Проверяем, существует ли новость с таким slug
-    cursor.execute("SELECT COUNT(*) FROM news WHERE slug = ?", (slug,))
+
+    # Проверяем, существует ли новость с таким же заголовком или slug
+    cursor.execute("SELECT COUNT(*) FROM news WHERE title = ? OR slug = ?", (title, slug))
     count = cursor.fetchone()[0]
     if count > 0:
-        slug = f"{slug}-{int(datetime.now().timestamp())}"
+        print(f"[DEBUG] Новость с заголовком '{title}' или slug '{slug}' уже существует. Пропускаем добавление.")
+        conn.close()
+        return
+
     cursor.execute("""
         INSERT INTO news (title, slug, excerpt, content, news_category_id, image_url, published_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -145,7 +149,7 @@ def save_news_callback(output):
         result_news = list(selected.values())
         print("[DEBUG] Відобрані новини по категоріях:", result_news)
         if not result_news:
-            print("[DEBUG] Немає новин, що задовольняють критерії (content ≥100 символів).")
+            print("[DEBUG] Немає новин, що задовольняють критерії (content ≥400 символів).")
         else:
             for news_item in result_news:
                 process_news_item(news_item)
